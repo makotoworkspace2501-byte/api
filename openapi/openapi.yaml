@@ -1,0 +1,242 @@
+openapi: 3.0.3
+info:
+  title: PSO API Balancer
+  description: Балансировщик API-запросов на основе алгоритма роя частиц (PSO)
+  version: 1.0.0
+servers:
+  - url: /api/v1
+    description: Основная версия API
+
+paths:
+  /health:
+    get:
+      summary: Проверка работоспособности балансировщика
+      operationId: getHealth
+      responses:
+        '200':
+          description: Сервис работает
+          content:
+            application/json:
+              example:
+                status: "ok"
+
+  /processes:
+    post:
+      summary: Отправить вычислительную задачу на балансировку
+      description: |
+        Сценарий 1: 202 Accepted (Успешная маршрутизация)
+        Сценарий 2: 401 Unauthorized (Ошибка аутентификации)
+        Сценарий 3: 400 Bad Request (Невалидный формат данных)
+        Сценарий 4: 503 Service Unavailable (Отказ всех целевых нод)
+      operationId: createProcess
+      parameters:
+        - name: X-Api-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Ключ клиента для аутентификации и проверки прав (X-Client-Id)
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Ключ для идемпотентности. Повторный запрос с тем же ключом вернет предыдущий результат без перезапуска вычислений.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - task
+              properties:
+                task:
+                  type: string
+                  example: "compute"
+            example:
+              task: "compute"
+      responses:
+        '202':
+          description: Задача успешно передана в очередь ноды
+          content:
+            application/json:
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "processing"
+        '400':
+          description: Невалидный формат данных (Отказ на этапе парсинга)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "bad_request"
+                  message: "Отсутствует обязательное поле 'task'"
+                  request_id: "req-123"
+        '401':
+          description: Ошибка аутентификации (Неверный или отсутствующий X-Api-Key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "unauthorized"
+                  message: "Неверный X-Api-Key"
+                  request_id: "req-124"
+        '503':
+          description: Отказ всех целевых нод (PSO не нашел живой ноды)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "service_unavailable"
+                  message: "Все целевые ноды недоступны или в статусе offline"
+                  request_id: "req-125"
+
+    get:
+      summary: Получить список задач владельца ключа
+      description: Возвращает постраничный список задач. В списке только вещи владельца этого ключа (X-Api-Key).
+      operationId: listProcesses
+      parameters:
+        - name: X-Api-Key
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+          description: Максимальное количество элементов на странице
+      responses:
+        '200':
+          description: Список задач
+          content:
+            application/json:
+              example:
+                items:
+                  - task_id: "550e8400-e29b-41d4-a716-446655440000"
+                    status: "processing"
+                limit: 20
+
+  /processes/{task_id}:
+    get:
+      summary: Чтение одной задачи по номеру
+      description: Клиент направляет GET запрос на балансировщик. Если задача не готова, возвращает статус процесса. Если готова, возвращает результат.
+      operationId: getProcess
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Api-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Статус или результат задачи
+          content:
+            application/json:
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "completed"
+                result: "data_payload"
+        '403':
+          description: Чужой ключ не видит чужое (несовпадение владельца task_id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "forbidden"
+                  message: "Доступ к задаче запрещен"
+                  request_id: "req-126"
+        '404':
+          description: Задача не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "not_found"
+                  message: "Задача с указанным ID не существует"
+                  request_id: "req-127"
+
+  /processes/{task_id}/status:
+    patch:
+      summary: Обновление статуса задачи (внутреннее или административное)
+      description: Попытка изменить статус завершенной задачи отклоняется с ошибкой 409 Conflict.
+      operationId: updateProcessStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [active, degraded, offline, completed]
+            example:
+              status: "completed"
+      responses:
+        '200':
+          description: Статус успешно обновлен
+          content:
+            application/json:
+              example:
+                task_id: "550e8400-e29b-41d4-a716-446655440000"
+                status: "completed"
+        '409':
+          description: Запрещённый переход статуса (задача уже завершена)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: "conflict"
+                  message: "Попытка изменить статус завершенной задачи"
+                  request_id: "req-128"
+
+components:
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - request_id
+          properties:
+            code:
+              type: string
+              example: "conflict"
+            message:
+              type: string
+              example: "Описание ошибки"
+            request_id:
+              type: string
+              example: "ab12cd34"
